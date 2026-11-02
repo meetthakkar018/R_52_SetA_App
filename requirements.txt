@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
+from typing import Any, Dict
 
-import joblib
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from config import MODEL_DIR, PROJECT_NAME, ROLL_NUMBER, TARGET_COLUMN
+from config import DATASET_PATH, MODEL_DIR, PROJECT_NAME, ROLL_NUMBER, RISK_THRESHOLDS, SEGMENT_FEATURES, TARGET_COLUMN
 from pipeline import (
     bulk_predict_records,
     clean_dataset,
@@ -17,47 +15,36 @@ from pipeline import (
     load_dataset,
     load_saved_artifacts,
     predict_single_borrower,
+    risk_band,
     train_kmeans_segmentation,
 )
 
 
-st.set_option("deprecation.showPyplotGlobalUse", False)
+st.set_page_config(page_title="Loan Default Risk Platform", layout="wide")
 
 
-def load_project_data() -> pd.DataFrame:
-    dataset = clean_dataset(load_dataset())
-    return dataset
-
-
-@st.cache_data
-def load_cached_dataset() -> pd.DataFrame:
-    return load_project_data()
-
-
-@st.cache_resource
-def load_models() -> dict:
-    if not MODEL_DIR.exists() or not (MODEL_DIR / "training_metadata.joblib").exists():
-        report = generate_training_report()
-        return {
-            "final_model": joblib.load(MODEL_DIR / "final_model.joblib"),
-            "selected_threshold": report["selected_threshold"],
-            "metadata": {
-                "selected_model": report["selected_model"],
-                "baseline_accuracy": report["baseline_accuracy"],
-                "comparison_df": report["comparison_df"],
-            },
-            "comparison_df": report["comparison_df"],
-        }
-    return load_saved_artifacts()
+def load_app_data() -> Dict[str, Any]:
+    if MODEL_DIR.exists() and any(MODEL_DIR.iterdir()):
+        try:
+            return load_saved_artifacts()
+        except Exception:
+            pass
+    return generate_training_report()
 
 
 @st.cache_data
-def load_segmentation() -> dict:
-    df = load_cached_dataset()
-    return train_kmeans_segmentation(df)
+def get_dataset() -> pd.DataFrame:
+    if not DATASET_PATH.exists():
+        raise FileNotFoundError(f"Dataset not found at {DATASET_PATH}. Please place the real CSV in the project data folder or in the configured local path.")
+    return clean_dataset(load_dataset(str(DATASET_PATH)))
 
 
-def render_css() -> None:
+@st.cache_data
+def get_segmentation() -> Dict[str, Any]:
+    return train_kmeans_segmentation(get_dataset())
+
+
+def local_css() -> None:
     st.markdown(
         """
         <style>
@@ -79,20 +66,22 @@ def render_css() -> None:
         }
         .stSidebar {
             background: var(--sidebar);
-            color: white;
+        }
+        .block-container {
+            padding-top: 1rem;
         }
         .metric-card {
             background: var(--card);
-            border-radius: 16px;
+            border-radius: 18px;
             padding: 1rem;
             border: 1px solid rgba(59,130,246,0.2);
-            box-shadow: 0 10px 25px rgba(0,0,0,0.12);
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.15);
         }
-        .section-title {
+        .section-label {
             font-size: 1.2rem;
-            font-weight: 700;
-            color: white;
-            margin-bottom: 0.5rem;
+            font-weight: 600;
+            color: var(--text);
+            margin-bottom: 0.6rem;
         }
         </style>
         """,
@@ -100,20 +89,21 @@ def render_css() -> None:
     )
 
 
-def metric_box(title: str, value: str, accent: str = "primary") -> None:
-    accent_map = {
-        "primary": "#3b82f6",
-        "secondary": "#06b6d4",
-        "success": "#22c55e",
-        "warning": "#f59e0b",
-        "danger": "#ef4444",
+def metric_card(title: str, value: str, detail: str = "", accent: str = "primary") -> None:
+    colors = {
+        "primary": "#3B82F6",
+        "secondary": "#06B6D4",
+        "success": "#22C55E",
+        "warning": "#F59E0B",
+        "danger": "#EF4444",
     }
-    color = accent_map.get(accent, "#3b82f6")
+    border = colors.get(accent, colors["primary"])
     st.markdown(
         f"""
-        <div class="metric-card" style="border-left: 4px solid {color};">
-            <div style="font-size: 0.75rem; color: #CBD5E1;">{title}</div>
-            <div style="font-size: 1.5rem; font-weight: 700; margin-top: 0.25rem;">{value}</div>
+        <div class="metric-card" style="border-left: 4px solid {border};">
+            <div style="font-size:0.8rem; color:#CBD5E1;">{title}</div>
+            <div style="font-size:1.5rem; font-weight:700; margin-top:0.2rem;">{value}</div>
+            <div style="font-size:0.78rem; color:#CBD5E1; margin-top:0.2rem;">{detail}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -121,39 +111,50 @@ def metric_box(title: str, value: str, accent: str = "primary") -> None:
 
 
 def render_dashboard() -> None:
-    df = load_cached_dataset()
-    artifacts = load_models()
-    metadata = artifacts.get("metadata", {})
-    comparison_df = artifacts.get("comparison_df")
-    selected_model = metadata.get("selected_model", "Final Model")
-    threshold = artifacts.get("selected_threshold", 0.5)
+    df = get_dataset()
+    report = load_app_data()
+    segmentation = get_segmentation()
+    comparison_df = report.get("comparison_df") if isinstance(report, dict) and hasattr(report.get("comparison_df"), "columns") else None
+    selected_model = report.get("selected_model", "Final Model") if isinstance(report, dict) else "Final Model"
+    selected_threshold = report.get("selected_threshold", 0.5) if isinstance(report, dict) else 0.5
 
-    total_borrowers = len(df)
-    default_cases = int((df[TARGET_COLUMN] == 1).sum())
-    default_rate = (default_cases / total_borrowers) * 100 if total_borrowers else 0.0
+    default_count = int((df[TARGET_COLUMN] == 1).sum())
+    total_records = len(df)
+    default_rate = (default_count / total_records) * 100 if total_records else 0.0
+    default_cases = df[TARGET_COLUMN].value_counts().sort_index()
+
+    st.markdown(
+        """
+        <div style="padding:0; margin:0 0 1rem 0;">
+            <h1 style="margin:0; color:#F8FAFC;">LOAN RISK ANALYTICS</h1>
+            <p style="margin:0; color:#CBD5E1;">AI-Powered Default Prediction & Borrower Intelligence</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        metric_box("Roll Number", "52", "primary")
+        metric_card("Roll Number", "52", "Project ID", "primary")
     with col2:
-        metric_box("Dataset Status", "Ready", "secondary")
+        metric_card("Dataset Status", "Ready", "Real dataset loaded", "secondary")
     with col3:
-        metric_box("Active Model", selected_model, "success")
+        metric_card("Active Model", str(selected_model), "Threshold-based final model", "success")
     with col4:
-        metric_box("Total Borrowers", f"{total_borrowers:,}", "warning")
+        metric_card("Total Borrowers", f"{total_records:,}", "Portfolio size", "warning")
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        metric_box("Total Default Cases", f"{default_cases:,}", "danger")
+        metric_card("Total Default Cases", f"{default_count:,}", "Positive class = default", "danger")
     with col2:
-        metric_box("Overall Default Rate", f"{default_rate:.2f}%", "danger")
+        metric_card("Overall Default Rate", f"{default_rate:.2f}%", "Risk exposure", "danger")
     with col3:
-        metric_box("Model Accuracy", f"{comparison_df.iloc[0]['Accuracy']:.4f}", "success") if comparison_df is not None and not comparison_df.empty else metric_box("Model Accuracy", "N/A", "success")
+        metric_card("Model Accuracy", f"{comparison_df.iloc[0]['Accuracy']:.4f}" if comparison_df is not None and not comparison_df.empty else "N/A", "Hold-out performance", "success")
     with col4:
-        metric_box("Decision Threshold", f"{threshold:.2f}", "secondary")
+        metric_card("Decision Threshold", f"{selected_threshold:.2f}", "Business cut-off", "secondary")
 
-    st.markdown('<div class="section-title">Portfolio Risk Overview</div>', unsafe_allow_html=True)
-    risk_distribution = pd.DataFrame({
+    st.markdown('<div class="section-label">Risk band distribution</div>', unsafe_allow_html=True)
+    risk_band_counts = pd.DataFrame({
         "Risk Band": ["Low Risk", "Medium Risk", "High Risk"],
         "Borrowers": [
             int((df[TARGET_COLUMN] == 0).sum()),
@@ -162,7 +163,7 @@ def render_dashboard() -> None:
         ],
     })
     fig = px.bar(
-        risk_distribution,
+        risk_band_counts,
         x="Risk Band",
         y="Borrowers",
         color="Risk Band",
@@ -171,45 +172,57 @@ def render_dashboard() -> None:
             "Medium Risk": "#F59E0B",
             "High Risk": "#EF4444",
         },
-        title="Risk band distribution",
+        title="Distribution of Observed Risk Bands",
     )
-    fig.update_layout(paper_bgcolor="#0B1120", plot_bgcolor="#0B1120", font={"color": "#F8FAFC"})
+    fig.update_layout(plot_bgcolor="#0B1120", paper_bgcolor="#0B1120", font={"color": "#F8FAFC"})
     st.plotly_chart(fig, use_container_width=True)
 
-    segmentation = load_segmentation()
     segment_profile = segmentation["segment_profile"]
-    fig2 = px.bar(segment_profile, x="segment_id", y="borrowers", color="segment_id", title="Cluster distribution")
-    fig2.update_layout(paper_bgcolor="#0B1120", plot_bgcolor="#0B1120", font={"color": "#F8FAFC"})
-    st.plotly_chart(fig2, use_container_width=True)
+    seg_fig = px.bar(segment_profile, x="segment_id", y="borrowers", title="Segment Distribution")
+    seg_fig.update_layout(plot_bgcolor="#0B1120", paper_bgcolor="#0B1120", font={"color": "#F8FAFC"})
+    st.plotly_chart(seg_fig, use_container_width=True)
 
 
 def render_eda() -> None:
-    df = load_cached_dataset()
+    df = get_dataset()
     st.title("EDA & Insights")
 
-    default_label_map = {0: "No Default", 1: "Default"}
-    default_counts = df[TARGET_COLUMN].value_counts().reset_index()
-    default_counts.columns = [TARGET_COLUMN, "count"]
-    default_counts[TARGET_COLUMN] = default_counts[TARGET_COLUMN].map(default_label_map)
+    kpis = [
+        ("Total Records", len(df)),
+        ("Default Cases", int((df[TARGET_COLUMN] == 1).sum())),
+        ("Non-Default Cases", int((df[TARGET_COLUMN] == 0).sum())),
+        ("Default Percentage", round((df[TARGET_COLUMN].mean() * 100), 2)),
+        ("Average Loan Amount", round(df["loan_amnt"].mean(), 2)),
+        ("Average Interest Rate", round(df["loan_int_rate"].mean(), 2)),
+        ("Average Income", round(df["person_income"].mean(), 2)),
+    ]
+    cols = st.columns(4)
+    for idx, (title, value) in enumerate(kpis):
+        with cols[idx % 4]:
+            st.metric(title, value)
+
+    status_counts = df[TARGET_COLUMN].value_counts().reset_index()
+    status_counts.columns = ["loan_status", "count"]
+    status_counts["loan_status"] = status_counts["loan_status"].map({0: "No Default", 1: "Default"})
+    fig = px.bar(status_counts, x="loan_status", y="count", color="loan_status", title="Loan Status Distribution")
+    fig.update_layout(plot_bgcolor="#0B1120", paper_bgcolor="#0B1120", font={"color": "#F8FAFC"})
+    st.plotly_chart(fig, use_container_width=True)
 
     charts = [
-        ("Default vs No Default", px.bar(default_counts, x=TARGET_COLUMN, y="count", color=TARGET_COLUMN, title="Default vs No Default")),
         ("Loan Grade Distribution", px.histogram(df, x="loan_grade", color="loan_grade", title="Loan Grade Distribution")),
-        ("Default Rate by Loan Grade", df.groupby("loan_grade")[TARGET_COLUMN].mean().reset_index().pipe(lambda x: px.bar(x, x="loan_grade", y=TARGET_COLUMN, color="loan_grade", title="Default Rate by Loan Grade"))),
-        ("Default Rate by Loan Intent", df.groupby("loan_intent")[TARGET_COLUMN].mean().reset_index().pipe(lambda x: px.bar(x, x="loan_intent", y=TARGET_COLUMN, color="loan_intent", title="Default Rate by Loan Intent"))),
-        ("Default Rate by Home Ownership", df.groupby("person_home_ownership")[TARGET_COLUMN].mean().reset_index().pipe(lambda x: px.bar(x, x="person_home_ownership", y=TARGET_COLUMN, color="person_home_ownership", title="Default Rate by Home Ownership"))),
+        ("Default Rate by Loan Grade", df.groupby("loan_grade")[TARGET_COLUMN].mean().reset_index().pipe(lambda d: px.bar(d, x="loan_grade", y=TARGET_COLUMN, color="loan_grade", title="Default Rate by Loan Grade"))),
+        ("Default Rate by Loan Intent", df.groupby("loan_intent")[TARGET_COLUMN].mean().reset_index().pipe(lambda d: px.bar(d, x="loan_intent", y=TARGET_COLUMN, color="loan_intent", title="Default Rate by Loan Intent"))),
+        ("Default Rate by Home Ownership", df.groupby("person_home_ownership")[TARGET_COLUMN].mean().reset_index().pipe(lambda d: px.bar(d, x="person_home_ownership", y=TARGET_COLUMN, color="person_home_ownership", title="Default Rate by Home Ownership"))),
         ("Loan Amount Distribution", px.histogram(df, x="loan_amnt", nbins=35, title="Loan Amount Distribution")),
         ("Income Distribution", px.histogram(df, x="person_income", nbins=35, title="Income Distribution")),
-        ("Interest Rate Distribution", px.histogram(df, x="loan_int_rate", nbins=35, title="Loan Interest Rate Distribution")),
+        ("Interest Rate Distribution", px.histogram(df, x="loan_int_rate", nbins=35, title="Interest Rate Distribution")),
         ("Loan Percent Income Distribution", px.histogram(df, x="loan_percent_income", nbins=35, title="Loan Percent Income Distribution")),
         ("Age Distribution", px.histogram(df, x="person_age", nbins=35, title="Age Distribution")),
         ("Employment Length Distribution", px.histogram(df, x="person_emp_length", nbins=35, title="Employment Length Distribution")),
-        ("Loan Amount vs Income", px.scatter(df, x="person_income", y="loan_amnt", color=TARGET_COLUMN, title="Loan Amount vs Income")),
-        ("Loan Interest Rate vs Loan Status", px.box(df, x=TARGET_COLUMN, y="loan_int_rate", color=TARGET_COLUMN, title="Loan Interest Rate vs Loan Status")),
     ]
 
     for _, fig in charts:
-        fig.update_layout(paper_bgcolor="#0B1120", plot_bgcolor="#0B1120", font={"color": "#F8FAFC"})
+        fig.update_layout(plot_bgcolor="#0B1120", paper_bgcolor="#0B1120", font={"color": "#F8FAFC"})
         st.plotly_chart(fig, use_container_width=True)
 
     corr = df[[
@@ -226,22 +239,30 @@ def render_eda() -> None:
     heatmap.update_layout(paper_bgcolor="#0B1120", plot_bgcolor="#0B1120", font={"color": "#F8FAFC"})
     st.plotly_chart(heatmap, use_container_width=True)
 
+    scatter = px.scatter(df, x="person_income", y="loan_amnt", color=TARGET_COLUMN, title="Loan Amount vs Income")
+    scatter.update_layout(plot_bgcolor="#0B1120", paper_bgcolor="#0B1120", font={"color": "#F8FAFC"})
+    st.plotly_chart(scatter, use_container_width=True)
+
+    box_plot = px.box(df, x=TARGET_COLUMN, y="loan_int_rate", color=TARGET_COLUMN, title="Interest Rate vs Loan Status")
+    box_plot.update_layout(plot_bgcolor="#0B1120", paper_bgcolor="#0B1120", font={"color": "#F8FAFC"})
+    st.plotly_chart(box_plot, use_container_width=True)
+
 
 def render_single_prediction() -> None:
     st.title("SINGLE BORROWER RISK ASSESSMENT")
-    artifacts = load_models()
+    artifacts = load_app_data()
     final_model = artifacts["final_model"]
-    threshold = float(artifacts.get("selected_threshold", 0.5))
-    segmentation = load_segmentation()
+    threshold = artifacts["selected_threshold"]
+    segmentation = get_segmentation()
 
-    with st.form("borrower_form"):
+    with st.form("single-borrower-form"):
         col1, col2, col3 = st.columns(3)
         with col1:
-            person_age = st.number_input("Person Age", min_value=18, max_value=100, value=35)
+            person_age = st.number_input("Person Age", min_value=18, max_value=90, value=35)
             person_income = st.number_input("Person Income", min_value=1000, value=70000)
-            person_emp_length = st.number_input("Person Employment Length (Years)", min_value=0.0, max_value=40.0, value=4.0)
-            loan_amount = st.number_input("Loan Amount", min_value=100, value=25000)
-            loan_interest_rate = st.number_input("Loan Interest Rate (%)", min_value=1.0, max_value=40.0, value=12.0)
+            person_emp_length = st.number_input("Person Employment Length", min_value=0.0, max_value=40.0, value=4.0)
+            loan_amnt = st.number_input("Loan Amount", min_value=100, value=25000)
+            loan_int_rate = st.number_input("Loan Interest Rate", min_value=1.0, max_value=50.0, value=12.0)
         with col2:
             person_home_ownership = st.selectbox("Person Home Ownership", ["RENT", "MORTGAGE", "OWN", "OTHER"])
             loan_intent = st.selectbox("Loan Intent", ["PERSONAL", "EDUCATION", "MEDICAL", "VENTURE", "HOMEIMPROVEMENT", "DEBTCONSOLIDATION"])
@@ -254,61 +275,60 @@ def render_single_prediction() -> None:
 
     if submit:
         record = {
-            "person_age": int(person_age),
-            "person_income": float(person_income),
+            "person_age": person_age,
+            "person_income": person_income,
             "person_home_ownership": person_home_ownership,
-            "person_emp_length": float(person_emp_length),
+            "person_emp_length": person_emp_length,
             "loan_intent": loan_intent,
             "loan_grade": loan_grade,
-            "loan_amnt": float(loan_amount),
-            "loan_int_rate": float(loan_interest_rate),
-            "loan_percent_income": float(loan_percent_income),
+            "loan_amnt": loan_amnt,
+            "loan_int_rate": loan_int_rate,
+            "loan_percent_income": loan_percent_income,
             "cb_person_default_on_file": cb_person_default_on_file,
-            "cb_person_cred_hist_length": int(cb_person_cred_hist_length),
+            "cb_person_cred_hist_length": cb_person_cred_hist_length,
         }
-        result = predict_single_borrower(record, final_model, threshold, segmentation)
-        default_prob_pct = result["default_probability"] * 100
-        no_default_pct = result["no_default_probability"] * 100
+        prediction = predict_single_borrower(record, final_model, threshold, segmentation)
+        default_pct = prediction["default_probability"] * 100
+        no_default_pct = prediction["no_default_probability"] * 100
 
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("Default Probability", f"{default_prob_pct:.1f}%")
+            st.metric("Default Probability", f"{default_pct:.1f}%")
         with col2:
             st.metric("No-Default Probability", f"{no_default_pct:.1f}%")
         with col3:
-            st.metric("Risk Band", result["risk_band"])
+            st.metric("Risk Band", prediction["risk_band"])
 
         st.write("### Prediction Result")
-        st.write(f"Borrower Segment ID: {result['segment_id']}")
-        st.write(f"Borrower Segment Name: {result['segment_name']}")
-        st.write(f"Selected Model: {artifacts['metadata'].get('selected_model', 'Final Model')}")
-        st.write(f"Decision Threshold: {threshold:.2f}")
+        st.write(f"Borrower Segment ID: {prediction['segment_id']}")
+        st.write(f"Borrower Segment Name: {prediction['segment_name']}")
+        st.write(f"Selected Model: {prediction['selected_model']}")
+        st.write(f"Decision Threshold: {prediction['threshold']:.2f}")
 
-        gauge = go.Figure(
+        fig = go.Figure(
             go.Indicator(
                 mode="gauge+number",
-                value=default_prob_pct,
+                value=default_pct,
                 title={"text": "Default Risk Gauge"},
                 gauge={
-                    "axis": {"range": [0, 100], "tickwidth": 1, "tickcolor": "white"},
+                    "axis": {"range": [0, 100], "tickwidth": 1, "tickcolor": "#FFF"},
                     "bar": {"color": "#EF4444"},
                     "steps": [
                         {"range": [0, 30], "color": "#22C55E"},
                         {"range": [30, 60], "color": "#F59E0B"},
                         {"range": [60, 100], "color": "#EF4444"},
                     ],
-                    "threshold": {"line": {"color": "white", "width": 3}, "thickness": 0.75, "value": 50},
+                    "threshold": {"line": {"color": "#FFF", "width": 4}, "thickness": 0.75, "value": 50},
                 },
             )
         )
-        gauge.update_layout(paper_bgcolor="#0B1120", font={"color": "#F8FAFC"})
-        st.plotly_chart(gauge, use_container_width=True)
+        fig.update_layout(paper_bgcolor="#0B1120", font={"color": "#F8FAFC"})
+        st.plotly_chart(fig, use_container_width=True)
 
         explanation = (
-            f"This borrower is classified as a {result['risk_band'].lower()} borrower. "
-            f"The model estimates a {default_prob_pct:.1f}% probability of default. "
+            f"This borrower is classified as a {prediction['risk_band'].lower()} borrower. The model estimates a {default_pct:.1f}% probability of default. "
             f"Their loan amount, income ratio, and interest rate contribute to the overall risk assessment. "
-            f"The borrower belongs to the '{result['segment_name']}' segment."
+            f"The borrower belongs to the '{prediction['segment_name']}' segment."
         )
         st.write("### Plain-English Explanation")
         st.write(explanation)
@@ -316,15 +336,15 @@ def render_single_prediction() -> None:
 
 def render_bulk_prediction() -> None:
     st.title("BULK BORROWER RISK ANALYSIS")
-    artifacts = load_models()
+    artifacts = load_app_data()
     final_model = artifacts["final_model"]
-    threshold = float(artifacts.get("selected_threshold", 0.5))
-    segmentation = load_segmentation()
+    segmentation = get_segmentation()
 
     uploaded = st.file_uploader("Upload borrower CSV", type=["csv"])
     if uploaded is not None:
-        raw_df = pd.read_csv(uploaded)
-        st.dataframe(raw_df.head(10), use_container_width=True)
+        df = pd.read_csv(uploaded)
+        st.write("### Dataset Preview")
+        st.dataframe(df.head(10), use_container_width=True)
 
         required = [
             "person_age",
@@ -339,12 +359,12 @@ def render_bulk_prediction() -> None:
             "cb_person_default_on_file",
             "cb_person_cred_hist_length",
         ]
-        missing = [col for col in required if col not in raw_df.columns]
+        missing = [col for col in required if col not in df.columns]
         if missing:
-            st.error(f"Missing required columns: {missing}")
+            st.error(f"Missing required borrower columns: {missing}")
         else:
             if st.button("Run Bulk Risk Analysis"):
-                results = bulk_predict_records(raw_df, final_model, threshold, segmentation)
+                results = bulk_predict_records(df, final_model, segmentation)
                 high_risk = int((results["risk_band"] == "High Risk").sum())
                 medium_risk = int((results["risk_band"] == "Medium Risk").sum())
                 low_risk = int((results["risk_band"] == "Low Risk").sum())
@@ -361,91 +381,100 @@ def render_bulk_prediction() -> None:
                     st.metric("Low Risk Borrowers", low_risk)
                 st.metric("Average Default Probability", f"{avg_default:.2f}%")
 
-                st.dataframe(
-                    results[[
-                        "person_age",
-                        "person_income",
-                        "loan_amnt",
-                        "loan_int_rate",
-                        "default_probability",
-                        "no_default_probability",
-                        "risk_band",
-                        "segment_id",
-                        "segment_name",
-                    ]],
-                    use_container_width=True,
-                )
-
-                csv_buffer = results.to_csv(index=False)
-                st.download_button("DOWNLOAD RISK REPORT", data=csv_buffer, file_name="loan_risk_report.csv", mime="text/csv")
+                display_cols = [
+                    "person_age",
+                    "person_income",
+                    "loan_amnt",
+                    "loan_int_rate",
+                    "default_probability",
+                    "no_default_probability",
+                    "risk_band",
+                    "segment_id",
+                    "segment_name",
+                ]
+                st.dataframe(results[display_cols], use_container_width=True)
+                st.download_button("DOWNLOAD RISK REPORT", data=results.to_csv(index=False), file_name="loan_risk_report.csv", mime="text/csv")
 
 
 def render_segmentation() -> None:
     st.title("BORROWER SEGMENTATION")
-    segmentation = load_segmentation()
+    segmentation = get_segmentation()
     profile = segmentation["segment_profile"]
+
     st.write(f"Silhouette Score: {segmentation['silhouette_score']:.4f}")
     st.dataframe(profile, use_container_width=True)
 
-    fig = px.bar(profile, x="segment_id", y="borrowers", color="segment_id", title="Cluster distribution")
-    fig.update_layout(paper_bgcolor="#0B1120", plot_bgcolor="#0B1120", font={"color": "#F8FAFC"})
-    st.plotly_chart(fig, use_container_width=True)
+    dist_fig = px.bar(profile, x="segment_id", y="borrowers", color="segment_id", title="Cluster Distribution")
+    dist_fig.update_layout(plot_bgcolor="#0B1120", paper_bgcolor="#0B1120", font={"color": "#F8FAFC"})
+    st.plotly_chart(dist_fig, use_container_width=True)
 
-    default_rate_fig = px.bar(profile, x="Segment Name", y="default_rate", color="segment_id", title="Default rate by segment")
-    default_rate_fig.update_layout(paper_bgcolor="#0B1120", plot_bgcolor="#0B1120", font={"color": "#F8FAFC"})
-    st.plotly_chart(default_rate_fig, use_container_width=True)
+    risk_fig = px.bar(profile, x="Segment Name", y="default_rate", color="segment_id", title="Default Rate by Segment")
+    risk_fig.update_layout(plot_bgcolor="#0B1120", paper_bgcolor="#0B1120", font={"color": "#F8FAFC"})
+    st.plotly_chart(risk_fig, use_container_width=True)
+
+    df = get_dataset()
+    cluster_assignment = segmentation["model"].predict(segmentation["scaler"].transform(pd.DataFrame(segmentation["imputer"].transform(df[SEGMENT_FEATURES]), columns=SEGMENT_FEATURES)))
+    plot_df = df.copy()
+    plot_df["segment_id"] = cluster_assignment
+    scatter = px.scatter(plot_df, x="loan_amnt", y="person_income", color="segment_id", title="Loan Amount vs Income by Segment")
+    scatter.update_layout(plot_bgcolor="#0B1120", paper_bgcolor="#0B1120", font={"color": "#F8FAFC"})
+    st.plotly_chart(scatter, use_container_width=True)
 
 
 def render_model_performance() -> None:
     st.title("MODEL PERFORMANCE & EVALUATION")
-    artifacts = load_models()
-    comparison_df = artifacts.get("comparison_df")
+    report = load_app_data()
+    comparison_df = report.get("comparison_df")
     if comparison_df is not None:
         st.dataframe(comparison_df, use_container_width=True)
 
-    if comparison_df is not None:
-        metric_columns = ["Accuracy", "Precision", "Recall", "F1 Score", "ROC-AUC"]
-        comparison_fig = px.bar(comparison_df, x="Model Name", y=metric_columns, barmode="group", title="Model comparison")
-        comparison_fig.update_layout(paper_bgcolor="#0B1120", plot_bgcolor="#0B1120", font={"color": "#F8FAFC"})
-        st.plotly_chart(comparison_fig, use_container_width=True)
+        fig = px.bar(
+            comparison_df,
+            x="Model Name",
+            y=["Accuracy", "Precision", "Recall", "F1 Score", "ROC-AUC"],
+            barmode="group",
+            title="Model Performance Comparison",
+        )
+        fig.update_layout(plot_bgcolor="#0B1120", paper_bgcolor="#0B1120", font={"color": "#F8FAFC"})
+        st.plotly_chart(fig, use_container_width=True)
 
-    baseline = artifacts["metadata"].get("baseline_accuracy", 0.0)
-    st.metric("Baseline Accuracy", f"{baseline:.4f}")
-    st.write(f"Selected Model: {artifacts['metadata'].get('selected_model', 'Final Model')}")
-    st.write(f"Selected Threshold: {float(artifacts.get('selected_threshold', 0.5)):.2f}")
+    st.metric("Baseline Accuracy", f"{report.get('baseline_accuracy', 0.0):.4f}")
+    st.write(f"Selected Model: {report.get('selected_model', 'N/A')}")
+    st.write(f"Selected Threshold: {report.get('selected_threshold', 0.5):.2f}")
 
 
 def render_about() -> None:
     st.title("About Project")
     st.markdown(
         """
-        <div class='section-title'>Loan Default Risk Prediction and Borrower Segmentation Platform</div>
+        <div class="section-label">Loan Default Risk Prediction and Borrower Segmentation Platform</div>
         <p><strong>Student Roll Number:</strong> 52</p>
         <p><strong>Project Type:</strong> Data Mining and Machine Learning</p>
         <p><strong>Objective:</strong> To predict the probability of loan default using supervised machine learning and segment borrowers using unsupervised learning techniques.</p>
         <p><strong>Algorithms:</strong> Logistic Regression, Random Forest, Gradient Boosting, K-Means Clustering</p>
         <p><strong>Dataset:</strong> Credit Risk Dataset</p>
-        <p>This system is designed to provide a complete risk-analysis workflow including preprocessing, model training, borrower segmentation, and a polished fintech dashboard for academic demonstration.</p>
-        <p><strong>Important Note:</strong> Predictions are estimates and should not be used alone to make lending decisions.</p>
+        <p>This project is designed as an MScIT academic application demonstrating end-to-end credit risk analysis, borrower segmentation, and practical model evaluation.</p>
+        <p><strong>Important Note:</strong> Predictions are estimates intended for educational and analytical use and should not be used alone to make lending decisions.</p>
         """,
         unsafe_allow_html=True,
     )
 
 
 def main() -> None:
-    render_css()
-    st.set_page_config(page_title="Loan Default Risk Platform", layout="wide")
-
-    pages = [
-        "Dashboard Overview",
-        "EDA & Insights",
-        "Single Borrower Prediction",
-        "Bulk Prediction",
-        "Borrower Segmentation",
-        "Model Performance",
-        "About Project",
-    ]
-    page = st.sidebar.radio("Navigation", pages)
+    local_css()
+    st.sidebar.title("Navigation")
+    page = st.sidebar.radio(
+        "Pages",
+        [
+            "Dashboard Overview",
+            "EDA & Insights",
+            "Single Borrower Prediction",
+            "Bulk Prediction",
+            "Borrower Segmentation",
+            "Model Performance",
+            "About Project",
+        ],
+    )
 
     if page == "Dashboard Overview":
         render_dashboard()

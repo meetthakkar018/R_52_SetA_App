@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Tuple
 
 import joblib
 import numpy as np
@@ -39,32 +37,27 @@ from config import (
 )
 
 
-def resolve_dataset_path() -> Path:
-    if DATASET_PATH.exists():
-        return DATASET_PATH
-
-    fallback = Path(__file__).resolve().parent / "data" / "credit_risk_dataset.csv"
-    if fallback.exists():
-        return fallback
-
+def resolve_dataset_path() -> str:
     candidates = [
+        DATASET_PATH,
+        DATASET_PATH.parent / "data" / "credit_risk_dataset.csv",
+        Path("data") / "credit_risk_dataset.csv",
+        Path(r"D:\roll 52\data\credit_risk_dataset.csv"),
+        Path(r"D:\roll52\data\credit_risk_dataset.csv"),
         Path(r"D:\roo52\data\credit_risk_dataset.csv"),
-        Path("data/credit_risk_dataset.csv"),
     ]
-    for path in candidates:
-        if path.exists():
-            return path
-    raise FileNotFoundError(
-        "Dataset not found. Place the real credit_risk_dataset.csv in D:/roo52/data/ or the project data/ folder."
-    )
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return str(DATASET_PATH)
 
 
-def load_dataset(path: Path | None = None) -> pd.DataFrame:
+def load_dataset(path: str | None = None) -> pd.DataFrame:
     actual_path = resolve_dataset_path() if path is None else path
     df = pd.read_csv(actual_path)
     df.columns = [str(col).strip() for col in df.columns]
-    if "loan_status" not in df.columns:
-        raise ValueError("loan_status column is required but was not found in the dataset.")
+    if TARGET_COLUMN not in df.columns:
+        raise ValueError(f"Target column '{TARGET_COLUMN}' not found in dataset.")
     return df
 
 
@@ -72,13 +65,21 @@ def clean_dataset(df: pd.DataFrame) -> pd.DataFrame:
     cleaned = df.copy()
     cleaned.columns = [str(col).strip() for col in cleaned.columns]
 
-    missing_columns = [col for col in REQUIRED_COLUMNS if col not in cleaned.columns]
-    if missing_columns:
-        raise ValueError(f"Missing required columns: {missing_columns}")
+    missing = [col for col in REQUIRED_COLUMNS if col not in cleaned.columns]
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
 
     cleaned = cleaned.drop_duplicates().reset_index(drop=True)
 
-    for col in ["person_age", "person_income", "person_emp_length", "loan_amnt", "loan_int_rate", "loan_percent_income", "cb_person_cred_hist_length"]:
+    for col in [
+        "person_age",
+        "person_income",
+        "person_emp_length",
+        "loan_amnt",
+        "loan_int_rate",
+        "loan_percent_income",
+        "cb_person_cred_hist_length",
+    ]:
         cleaned[col] = pd.to_numeric(cleaned[col], errors="coerce")
 
     cleaned[TARGET_COLUMN] = pd.to_numeric(cleaned[TARGET_COLUMN], errors="coerce")
@@ -86,7 +87,11 @@ def clean_dataset(df: pd.DataFrame) -> pd.DataFrame:
     cleaned[TARGET_COLUMN] = cleaned[TARGET_COLUMN].clip(0, 1)
 
     for col in ["person_home_ownership", "loan_intent", "loan_grade", "cb_person_default_on_file"]:
-        cleaned[col] = cleaned[col].fillna(cleaned[col].mode().iloc[0] if not cleaned[col].mode().empty else "Unknown")
+        mode_value = cleaned[col].mode()
+        if not mode_value.empty:
+            cleaned[col] = cleaned[col].fillna(mode_value.iloc[0])
+        else:
+            cleaned[col] = cleaned[col].fillna("Unknown")
 
     for col in [
         "person_age",
@@ -120,26 +125,36 @@ def build_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
         "loan_grade",
         "cb_person_default_on_file",
     ]
+    num_cols = [col for col in numeric_features if col in X.columns]
+    cat_cols = [col for col in categorical_features if col in X.columns]
 
-    numeric_transformer = Pipeline(
-        steps=[
-            ("imputer", SimpleImputer(strategy="median")),
-            ("scaler", StandardScaler()),
-        ]
-    )
-    categorical_transformer = Pipeline(
-        steps=[
-            ("imputer", SimpleImputer(strategy="most_frequent")),
-            ("onehot", OneHotEncoder(handle_unknown="ignore")),
-        ]
-    )
-
-    transformers = []
-    if numeric_features:
-        transformers.append(("num", numeric_transformer, [col for col in numeric_features if col in X.columns]))
-    if categorical_features:
-        transformers.append(("cat", categorical_transformer, [col for col in categorical_features if col in X.columns]))
-
+    transformers: List[Tuple[str, Pipeline, List[str]]] = []
+    if num_cols:
+        transformers.append(
+            (
+                "num",
+                Pipeline(
+                    steps=[
+                        ("imputer", SimpleImputer(strategy="median")),
+                        ("scaler", StandardScaler()),
+                    ]
+                ),
+                num_cols,
+            )
+        )
+    if cat_cols:
+        transformers.append(
+            (
+                "cat",
+                Pipeline(
+                    steps=[
+                        ("imputer", SimpleImputer(strategy="most_frequent")),
+                        ("onehot", OneHotEncoder(handle_unknown="ignore")),
+                    ]
+                ),
+                cat_cols,
+            )
+        )
     return ColumnTransformer(transformers=transformers, remainder="drop")
 
 
@@ -160,10 +175,9 @@ def compute_threshold_metrics(y_true: pd.Series, probabilities: np.ndarray, thre
     }
 
 
-def select_validation_threshold(y_true: pd.Series, probabilities: np.ndarray) -> Dict[str, float]:
-    thresholds = np.linspace(0.10, 0.90, 81)
+def select_validation_threshold(y_true: pd.Series, probabilities: np.ndarray) -> Dict[str, Any]:
     best = None
-    for threshold in thresholds:
+    for threshold in np.linspace(0.10, 0.90, 81):
         metrics = compute_threshold_metrics(y_true, probabilities, float(threshold))
         selection_score = metrics["f1"] + 0.4 * metrics["recall"] + 0.2 * metrics["precision"]
         candidate = {**metrics, "selection_score": float(selection_score)}
@@ -172,12 +186,8 @@ def select_validation_threshold(y_true: pd.Series, probabilities: np.ndarray) ->
     return best
 
 
-def baseline_accuracy(y_true: pd.Series) -> float:
-    return float((y_true == 0).mean())
-
-
-def evaluate_model(pipeline: Pipeline, X_test: pd.DataFrame, y_test: pd.Series, threshold: float) -> Dict[str, object]:
-    probabilities = pipeline.predict_proba(X_test)[:, 1]
+def evaluate_model(model_pipeline: Pipeline, X_test: pd.DataFrame, y_test: pd.Series, threshold: float) -> Dict[str, Any]:
+    probabilities = model_pipeline.predict_proba(X_test)[:, 1]
     y_pred = (probabilities >= threshold).astype(int)
     return {
         "accuracy": float(accuracy_score(y_test, y_pred)),
@@ -187,12 +197,16 @@ def evaluate_model(pipeline: Pipeline, X_test: pd.DataFrame, y_test: pd.Series, 
         "roc_auc": float(roc_auc_score(y_test, probabilities)),
         "confusion_matrix": confusion_matrix(y_test, y_pred, labels=[0, 1]).tolist(),
         "threshold": float(threshold),
-        "y_pred": y_pred,
         "probabilities": probabilities,
+        "predictions": y_pred,
     }
 
 
-def train_classifier(name: str, estimator) -> Dict[str, object]:
+def baseline_accuracy(y_true: pd.Series) -> float:
+    return float((y_true == 0).mean())
+
+
+def train_classifier(name: str, estimator: Any) -> Dict[str, Any]:
     df = clean_dataset(load_dataset())
     X = df.drop(columns=[TARGET_COLUMN])
     y = df[TARGET_COLUMN]
@@ -204,7 +218,6 @@ def train_classifier(name: str, estimator) -> Dict[str, object]:
         random_state=RANDOM_STATE,
         stratify=y,
     )
-
     X_train_f, X_valid, y_train_f, y_valid = train_test_split(
         X_train,
         y_train,
@@ -213,29 +226,29 @@ def train_classifier(name: str, estimator) -> Dict[str, object]:
         stratify=y_train,
     )
 
-    model_pipeline = Pipeline(
+    pipeline = Pipeline(
         steps=[
             ("preprocessor", build_preprocessor(X_train_f)),
             ("classifier", estimator),
         ]
     )
-    model_pipeline.fit(X_train_f, y_train_f)
+    pipeline.fit(X_train_f, y_train_f)
 
-    val_probs = model_pipeline.predict_proba(X_valid)[:, 1]
-    validation_thresholds = select_validation_threshold(y_valid, val_probs)
-    threshold = validation_thresholds["threshold"]
+    valid_probs = pipeline.predict_proba(X_valid)[:, 1]
+    validation_threshold = select_validation_threshold(y_valid, valid_probs)
+    threshold = validation_threshold["threshold"]
+    test_result = evaluate_model(pipeline, X_test, y_test, threshold)
 
-    test_result = evaluate_model(model_pipeline, X_test, y_test, threshold)
     return {
         "name": name,
-        "pipeline": model_pipeline,
+        "pipeline": pipeline,
         "threshold": threshold,
-        "validation_metrics": validation_thresholds,
+        "validation_metrics": validation_threshold,
         "test_metrics": test_result,
     }
 
 
-def train_all_models() -> Dict[str, object]:
+def train_all_models() -> Dict[str, Any]:
     model_specs = {
         "Logistic Regression": LogisticRegression(max_iter=2000, class_weight="balanced"),
         "Random Forest": RandomForestClassifier(
@@ -264,89 +277,88 @@ def train_all_models() -> Dict[str, object]:
     scores = []
     for model in trained_models:
         metrics = model["test_metrics"]
-        selection_value = metrics["f1"] + 0.4 * metrics["recall"] + 0.2 * metrics["precision"]
-        scores.append({
-            "model": model["name"],
-            "threshold": model["threshold"],
-            "selection_value": selection_value,
-            "metrics": metrics,
-        })
+        selection_score = metrics["f1"] + 0.4 * metrics["recall"] + 0.2 * metrics["precision"]
+        scores.append(
+            {
+                "model": model["name"],
+                "threshold": model["threshold"],
+                "selection_score": float(selection_score),
+                "metrics": metrics,
+            }
+        )
 
-    selected_model = max(scores, key=lambda item: item["selection_value"])
-    selected_name = selected_model["model"]
-    selected_record = next(model for model in trained_models if model["name"] == selected_name)
+    selected = max(scores, key=lambda item: item["selection_score"])
+    selected_name = selected["model"]
 
     comparison_rows = []
     for model in trained_models:
         metrics = model["test_metrics"]
-        comparison_rows.append({
-            "Model Name": model["name"],
-            "Accuracy": round(metrics["accuracy"], 4),
-            "Precision": round(metrics["precision"], 4),
-            "Recall": round(metrics["recall"], 4),
-            "F1 Score": round(metrics["f1"], 4),
-            "ROC-AUC": round(metrics["roc_auc"], 4),
-            "Improvement over Baseline": round(metrics["accuracy"] - baseline, 4),
-            "Threshold": round(model["threshold"], 4),
-        })
+        comparison_rows.append(
+            {
+                "Model Name": model["name"],
+                "Accuracy": round(metrics["accuracy"], 4),
+                "Precision": round(metrics["precision"], 4),
+                "Recall": round(metrics["recall"], 4),
+                "F1 Score": round(metrics["f1"], 4),
+                "ROC-AUC": round(metrics["roc_auc"], 4),
+                "Improvement over Baseline": round(metrics["accuracy"] - baseline, 4),
+                "Threshold": round(model["threshold"], 4),
+            }
+        )
 
-    comparison_df = pd.DataFrame(comparison_rows)
-
-    return {
+    summary = {
         "trained_models": trained_models,
         "selected_model": selected_name,
-        "selected_threshold": float(selected_model["threshold"]),
-        "baseline_accuracy": baseline,
-        "comparison_df": comparison_df,
+        "selected_threshold": float(selected["threshold"]),
+        "baseline_accuracy": float(baseline),
+        "comparison_df": pd.DataFrame(comparison_rows),
         "X_test": X_test,
         "y_test": y_test,
     }
+    return summary
 
 
-def save_training_artifacts(summary: Dict[str, object]) -> None:
+def save_training_artifacts(summary: Dict[str, Any]) -> None:
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
     for model in summary["trained_models"]:
-        name = model["name"]
         artifact_name = {
             "Logistic Regression": MODEL_ARTIFACTS["logistic_regression"],
             "Random Forest": MODEL_ARTIFACTS["random_forest"],
             "Gradient Boosting": MODEL_ARTIFACTS["gradient_boosting"],
-        }[name]
-        joblib.dump(model["pipeline"], MODEL_DIR / artifact_name)
+        }.get(model["name"])
+        if artifact_name:
+            joblib.dump(model["pipeline"], MODEL_DIR / artifact_name)
 
-    selected_name = summary["selected_model"]
-    final_pipeline = next(model["pipeline"] for model in summary["trained_models"] if model["name"] == selected_name)
+    selected_model = summary["selected_model"]
+    final_pipeline = next(model["pipeline"] for model in summary["trained_models"] if model["name"] == selected_model)
     joblib.dump(final_pipeline, MODEL_DIR / MODEL_ARTIFACTS["final_model"])
     joblib.dump(summary["selected_threshold"], MODEL_DIR / MODEL_ARTIFACTS["threshold"])
     joblib.dump(summary["comparison_df"], MODEL_DIR / MODEL_ARTIFACTS["comparison"])
-    joblib.dump({
-        "selected_model": selected_name,
-        "selected_threshold": summary["selected_threshold"],
-        "baseline_accuracy": summary["baseline_accuracy"],
-        "comparison_df": summary["comparison_df"],
-    }, MODEL_DIR / MODEL_ARTIFACTS["training_metadata"])
+    joblib.dump(
+        {
+            "selected_model": selected_model,
+            "selected_threshold": summary["selected_threshold"],
+            "baseline_accuracy": summary["baseline_accuracy"],
+            "comparison_df": summary["comparison_df"],
+        },
+        MODEL_DIR / MODEL_ARTIFACTS["training_metadata"],
+    )
 
 
-def load_saved_artifacts() -> Dict[str, object]:
+def load_saved_artifacts() -> Dict[str, Any]:
     model_map = {
         "Logistic Regression": MODEL_DIR / MODEL_ARTIFACTS["logistic_regression"],
         "Random Forest": MODEL_DIR / MODEL_ARTIFACTS["random_forest"],
         "Gradient Boosting": MODEL_DIR / MODEL_ARTIFACTS["gradient_boosting"],
     }
-
-    model_artifacts = {name: joblib.load(path) for name, path in model_map.items()}
-    final_model = joblib.load(MODEL_DIR / MODEL_ARTIFACTS["final_model"])
-    comparison_df = joblib.load(MODEL_DIR / MODEL_ARTIFACTS["comparison"])
-    metadata = joblib.load(MODEL_DIR / MODEL_ARTIFACTS["training_metadata"])
-    selected_threshold = joblib.load(MODEL_DIR / MODEL_ARTIFACTS["threshold"])
-
+    models = {name: joblib.load(path) for name, path in model_map.items()}
     return {
-        "models": model_artifacts,
-        "final_model": final_model,
-        "comparison_df": comparison_df,
-        "metadata": metadata,
-        "selected_threshold": selected_threshold,
+        "models": models,
+        "final_model": joblib.load(MODEL_DIR / MODEL_ARTIFACTS["final_model"]),
+        "selected_threshold": joblib.load(MODEL_DIR / MODEL_ARTIFACTS["threshold"]),
+        "comparison_df": joblib.load(MODEL_DIR / MODEL_ARTIFACTS["comparison"]),
+        "metadata": joblib.load(MODEL_DIR / MODEL_ARTIFACTS["training_metadata"]),
     }
 
 
@@ -358,13 +370,21 @@ def risk_band(probability: float) -> str:
     return "High Risk"
 
 
-def segment_name_from_profile(profile: pd.Series) -> str:
-    avg_interest = profile["avg_interest_rate"]
-    avg_income = profile["avg_income"]
-    avg_loan_ratio = profile["avg_loan_percent_income"]
-    avg_credit = profile["avg_credit_history"]
+def prepare_segmentation_features(df: pd.DataFrame) -> pd.DataFrame:
+    feature_frame = df[SEGMENT_FEATURES].copy()
+    for col in feature_frame.columns:
+        feature_frame[col] = pd.to_numeric(feature_frame[col], errors="coerce")
+    feature_frame = feature_frame.fillna(feature_frame.median())
+    return feature_frame
 
-    if avg_loan_ratio >= 0.35:
+
+def segment_name_from_profile(profile: pd.Series) -> str:
+    avg_interest = float(profile["avg_interest_rate"])
+    avg_income = float(profile["avg_income"])
+    avg_ratio = float(profile["avg_loan_percent_income"])
+    avg_credit = float(profile["avg_credit_history"])
+
+    if avg_ratio >= 0.35:
         return "High Loan-to-Income Borrowers"
     if avg_income >= 80000:
         return "High-Income Established Borrowers"
@@ -375,15 +395,7 @@ def segment_name_from_profile(profile: pd.Series) -> str:
     return "Low-Risk Stable Borrowers"
 
 
-def prepare_segmentation_features(df: pd.DataFrame) -> pd.DataFrame:
-    feature_frame = df[SEGMENT_FEATURES].copy()
-    for col in feature_frame.columns:
-        feature_frame[col] = pd.to_numeric(feature_frame[col], errors="coerce")
-    feature_frame = feature_frame.fillna(feature_frame.median())
-    return feature_frame
-
-
-def train_kmeans_segmentation(df: pd.DataFrame) -> Dict[str, object]:
+def train_kmeans_segmentation(df: pd.DataFrame) -> Dict[str, Any]:
     feature_frame = prepare_segmentation_features(df)
     imputer = SimpleImputer(strategy="median")
     imputed = pd.DataFrame(imputer.fit_transform(feature_frame), columns=feature_frame.columns)
@@ -394,12 +406,12 @@ def train_kmeans_segmentation(df: pd.DataFrame) -> Dict[str, object]:
     model = KMeans(n_clusters=K, random_state=RANDOM_STATE, n_init=10)
     cluster_ids = model.fit_predict(scaled)
 
-    profile_data = imputed.copy()
-    profile_data["segment_id"] = cluster_ids
-    profile_data["loan_status"] = df[TARGET_COLUMN].reset_index(drop=True).to_numpy()
+    cluster_df = imputed.copy()
+    cluster_df["segment_id"] = cluster_ids
+    cluster_df["loan_status"] = df[TARGET_COLUMN].reset_index(drop=True).to_numpy()
 
-    profile = (
-        profile_data.groupby("segment_id")
+    segment_profile = (
+        cluster_df.groupby("segment_id")
         .agg(
             borrowers=("loan_status", "size"),
             avg_age=("person_age", "mean"),
@@ -413,9 +425,8 @@ def train_kmeans_segmentation(df: pd.DataFrame) -> Dict[str, object]:
         )
         .reset_index()
     )
-
-    profile["Segment Name"] = profile.apply(segment_name_from_profile, axis=1)
-    profile = profile.sort_values("segment_id").reset_index(drop=True)
+    segment_profile["Segment Name"] = segment_profile.apply(segment_name_from_profile, axis=1)
+    segment_profile = segment_profile.sort_values("segment_id").reset_index(drop=True)
 
     silhouette = silhouette_score(scaled, cluster_ids)
 
@@ -424,12 +435,12 @@ def train_kmeans_segmentation(df: pd.DataFrame) -> Dict[str, object]:
         "scaler": scaler,
         "imputer": imputer,
         "cluster_ids": cluster_ids,
-        "segment_profile": profile,
+        "segment_profile": segment_profile,
         "silhouette_score": float(silhouette),
     }
 
 
-def predict_segment_for_record(record: dict | pd.Series | pd.DataFrame, segmentation: Dict[str, object]) -> Tuple[int, str]:
+def predict_segment_for_record(record: dict | pd.Series | pd.DataFrame, segmentation: Dict[str, Any]) -> Tuple[int, str]:
     if isinstance(record, pd.DataFrame):
         row = record.iloc[0]
     elif isinstance(record, pd.Series):
@@ -445,8 +456,7 @@ def predict_segment_for_record(record: dict | pd.Series | pd.DataFrame, segmenta
     return segment_id, profile["Segment Name"]
 
 
-def predict_single_borrower(record: dict, final_model, threshold: float, segmentation: Dict[str, object]) -> Dict[str, object]:
-    record_df = pd.DataFrame([record])
+def predict_single_borrower(record: dict, final_model, threshold: float, segmentation: Dict[str, Any]) -> Dict[str, Any]:
     feature_columns = [
         "person_age",
         "person_income",
@@ -460,16 +470,15 @@ def predict_single_borrower(record: dict, final_model, threshold: float, segment
         "cb_person_default_on_file",
         "cb_person_cred_hist_length",
     ]
-    model_input = record_df[feature_columns]
-    probabilities = final_model.predict_proba(model_input)[0]
-    default_prob = float(probabilities[1])
-    no_default_prob = float(probabilities[0])
+    input_df = pd.DataFrame([record])[feature_columns]
+    probabilities = final_model.predict_proba(input_df)[0]
+    default_probability = float(probabilities[1])
+    no_default_probability = float(probabilities[0])
     segment_id, segment_name = predict_segment_for_record(record, segmentation)
-
     return {
-        "default_probability": default_prob,
-        "no_default_probability": no_default_prob,
-        "risk_band": risk_band(default_prob),
+        "default_probability": default_probability,
+        "no_default_probability": no_default_probability,
+        "risk_band": risk_band(default_probability),
         "segment_id": segment_id,
         "segment_name": segment_name,
         "selected_model": final_model.__class__.__name__,
@@ -477,7 +486,7 @@ def predict_single_borrower(record: dict, final_model, threshold: float, segment
     }
 
 
-def bulk_predict_records(df: pd.DataFrame, final_model, threshold: float, segmentation: Dict[str, object]) -> pd.DataFrame:
+def bulk_predict_records(input_df: pd.DataFrame, final_model, segmentation: Dict[str, Any]) -> pd.DataFrame:
     required = [
         "person_age",
         "person_income",
@@ -491,35 +500,33 @@ def bulk_predict_records(df: pd.DataFrame, final_model, threshold: float, segmen
         "cb_person_default_on_file",
         "cb_person_cred_hist_length",
     ]
-    missing = [col for col in required if col not in df.columns]
+    missing = [col for col in required if col not in input_df.columns]
     if missing:
         raise ValueError(f"Input CSV is missing required columns: {missing}")
 
-    results = df.copy()
-    probabilities = final_model.predict_proba(df[required])[:, 1]
+    results = input_df.copy()
+    probabilities = final_model.predict_proba(input_df[required])[:, 1]
     results["default_probability"] = probabilities
     results["no_default_probability"] = 1 - probabilities
     results["risk_band"] = results["default_probability"].apply(risk_band)
     results["segment_id"] = None
     results["segment_name"] = None
 
-    for index, row in results.iterrows():
+    for idx, row in results.iterrows():
         segment_id, segment_name = predict_segment_for_record(row, segmentation)
-        results.at[index, "segment_id"] = segment_id
-        results.at[index, "segment_name"] = segment_name
+        results.at[idx, "segment_id"] = segment_id
+        results.at[idx, "segment_name"] = segment_name
 
-    results = results.sort_values("default_probability", ascending=False).reset_index(drop=True)
-    return results
+    return results.sort_values("default_probability", ascending=False).reset_index(drop=True)
 
 
-def generate_training_report() -> Dict[str, object]:
+def generate_training_report() -> Dict[str, Any]:
     dataset = clean_dataset(load_dataset())
     summary = train_all_models()
     save_training_artifacts(summary)
     segmentation = train_kmeans_segmentation(dataset)
     summary["segmentation"] = segmentation
     summary["dataset_shape"] = dataset.shape
-    summary["selected_model_threshold"] = summary["selected_threshold"]
     return summary
 
 
