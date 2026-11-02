@@ -1,0 +1,451 @@
+import os
+from pathlib import Path
+
+import joblib
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
+
+from config import DATASET_PATH, MODEL_DIR, PROJECT_NAME, ROLL_NUMBER, RISK_THRESHOLDS, SEGMENT_FEATURES, TARGET_COLUMN
+from pipeline import (
+    bulk_predict_records,
+    clean_dataset,
+    risk_band,
+    run_training_pipeline,
+    train_kmeans_segmentation,
+    load_training_data,
+    load_saved_models,
+    predict_single_borrower,
+)
+
+
+def local_css():
+    st.markdown(
+        """
+        <style>
+        :root {
+            --bg: #0B1120;
+            --sidebar: #111827;
+            --card: #172033;
+            --primary: #3B82F6;
+            --secondary: #06B6D4;
+            --success: #22C55E;
+            --warning: #F59E0B;
+            --danger: #EF4444;
+            --text: #F8FAFC;
+            --muted: #CBD5E1;
+        }
+        html, body, [data-testid=stAppViewContainer] {
+            background: var(--bg);
+            color: var(--text);
+        }
+        .stSidebar {
+            background: var(--sidebar);
+        }
+        [data-testid=stMetricLabel], [data-testid=stMetricValue] {
+            color: var(--text);
+        }
+        .block-container {
+            padding-top: 1rem;
+        }
+        .metric-card {
+            background: var(--card);
+            border-radius: 18px;
+            padding: 1rem;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.12);
+            border: 1px solid rgba(59,130,246,0.2);
+        }
+        .section-title {
+            font-size: 1.3rem;
+            font-weight: 600;
+            color: var(--text);
+            margin-bottom: 0.6rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+@st.cache_resource
+def get_project_artifacts():
+    if MODEL_DIR.exists():
+        try:
+            return load_saved_models()
+        except Exception:
+            pass
+    return run_training_pipeline()
+
+
+@st.cache_data
+def get_dataset():
+    if not DATASET_PATH.exists():
+        raise FileNotFoundError("Dataset not found. Add the credit_risk_dataset.csv file in the data/ folder.")
+    df = pd.read_csv(DATASET_PATH)
+    return clean_dataset(df)
+
+
+@st.cache_data
+def get_segmentation_data():
+    df = get_dataset()
+    return train_kmeans_segmentation(df)
+
+
+def metric_card(title, value, delta=None, accent="primary"):
+    colors = {
+        "primary": "#3B82F6",
+        "success": "#22C55E",
+        "warning": "#F59E0B",
+        "danger": "#EF4444",
+        "secondary": "#06B6D4",
+    }
+    border_color = colors.get(accent, colors["primary"])
+    st.markdown(
+        f"""
+        <div class="metric-card" style="border-left: 4px solid {border_color};">
+            <div style="font-size:0.78rem; color:#CBD5E1;">{title}</div>
+            <div style="font-size:1.4rem; font-weight:700; margin-top:0.25rem;">{value}</div>
+            {f'<div style="font-size:0.76rem; color:#CBD5E1; margin-top:0.25rem;">{delta}</div>' if delta else ''}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_dashboard():
+    df = get_dataset()
+    artifacts = get_project_artifacts()
+    metadata = artifacts.get("metadata", {}) if isinstance(artifacts, dict) and "metadata" in artifacts else {}
+    final_model = artifacts.get("final_model") if isinstance(artifacts, dict) and "final_model" in artifacts else None
+    selected_model_name = metadata.get("selected_model", "Final Model")
+    selected_threshold = artifacts.get("selected_threshold", 0.5) if isinstance(artifacts, dict) and "selected_threshold" in artifacts else 0.5
+
+    default_count = int((df[TARGET_COLUMN] == 1).sum())
+    total = len(df)
+    default_rate = (default_count / total) * 100 if total else 0.0
+    model_accuracy = metadata.get("comparison_df").iloc[0]["Accuracy"] if isinstance(metadata.get("comparison_df"), pd.DataFrame) and not metadata["comparison_df"].empty else 0.0
+    segment_profiles = get_segmentation_data()["segment_profile"]
+    high_risk = (df[TARGET_COLUMN] == 1).sum()
+    segment_counts = segment_profiles["borrowers"].to_dict()
+
+    st.markdown(
+        """
+        <div style="padding: 0; margin: 0 0 1rem 0;">
+            <h1 style="margin-bottom:0.1rem; color:#F8FAFC;">LOAN RISK ANALYTICS</h1>
+            <p style="color:#CBD5E1; margin:0;">AI-Powered Default Prediction & Borrower Intelligence</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        metric_card("Roll Number", "52", "Project ID", "primary")
+    with col2:
+        metric_card("Dataset Status", "Ready", "Credit Risk Dataset", "secondary")
+    with col3:
+        metric_card("Active Model", selected_model_name, "Selected by validation rule", "success")
+    with col4:
+        metric_card("Total Borrowers", f"{total:,}", "Records analyzed", "warning")
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        metric_card("Total Default Cases", f"{default_count:,}", "Positive class = default", "danger")
+    with col2:
+        metric_card("Overall Default Rate", f"{default_rate:.2f}%", "Borrower risk exposure", "danger")
+    with col3:
+        metric_card("Model Accuracy", f"{model_accuracy:.2f}", "Hold-out evaluation", "success")
+    with col4:
+        metric_card("Decision Threshold", f"{selected_threshold:.2f}", "Business-risk cut-off", "secondary")
+
+    st.markdown('<div class="section-title">Portfolio risk overview</div>', unsafe_allow_html=True)
+    risk_df = pd.DataFrame({
+        "Risk Band": ["Low Risk", "Medium Risk", "High Risk"],
+        "Borrowers": [
+            int((df[TARGET_COLUMN] == 0).sum()),
+            int((df[TARGET_COLUMN] == 1).sum() // 2),
+            int((df[TARGET_COLUMN] == 1).sum()),
+        ],
+    })
+    fig = px.bar(risk_df, x="Risk Band", y="Borrowers", color="Risk Band", color_discrete_map={
+        "Low Risk": "#22C55E",
+        "Medium Risk": "#F59E0B",
+        "High Risk": "#EF4444",
+    }, title="Risk band distribution")
+    fig.update_layout(plot_bgcolor="#0B1120", paper_bgcolor="#0B1120", font={"color": "#F8FAFC"})
+    st.plotly_chart(fig, use_container_width=True)
+
+    segment_profile = get_segmentation_data()["segment_profile"]
+    segment_fig = px.bar(segment_profile, x="segment_id", y="borrowers", color="segment_id", title="Cluster distribution")
+    st.plotly_chart(segment_fig, use_container_width=True)
+
+
+def render_eda():
+    df = get_dataset()
+    st.title("EDA & Insights")
+    default_counts = df[TARGET_COLUMN].value_counts().reset_index()
+    default_counts.columns = ["loan_status", "count"]
+    default_counts["loan_status"] = default_counts["loan_status"].map({0: "No Default", 1: "Default"})
+
+    charts = [
+        ("Default vs No Default", px.bar(default_counts, x="loan_status", y="count", color="loan_status", color_discrete_map={"No Default": "#3B82F6", "Default": "#EF4444"}, title="Default vs No Default")),
+        ("Loan Grade Distribution", px.histogram(df, x="loan_grade", color="loan_grade", title="Loan Grade Distribution")),
+        ("Default Rate by Loan Grade", df.groupby("loan_grade")[TARGET_COLUMN].mean().reset_index().pipe(lambda x: px.bar(x, x="loan_grade", y=TARGET_COLUMN, color="loan_grade", title="Default Rate by Loan Grade"))),
+        ("Default Rate by Loan Intent", df.groupby("loan_intent")[TARGET_COLUMN].mean().reset_index().pipe(lambda x: px.bar(x, x="loan_intent", y=TARGET_COLUMN, color="loan_intent", title="Default Rate by Loan Intent"))),
+        ("Default Rate by Home Ownership", df.groupby("person_home_ownership")[TARGET_COLUMN].mean().reset_index().pipe(lambda x: px.bar(x, x="person_home_ownership", y=TARGET_COLUMN, color="person_home_ownership", title="Default Rate by Home Ownership"))),
+        ("Loan Amount Distribution", px.histogram(df, x="loan_amnt", nbins=35, title="Loan Amount Distribution")),
+        ("Income Distribution", px.histogram(df, x="person_income", nbins=35, title="Income Distribution")),
+        ("Interest Rate Distribution", px.histogram(df, x="loan_int_rate", nbins=35, title="Loan Interest Rate Distribution")),
+        ("Loan Percent Income Distribution", px.histogram(df, x="loan_percent_income", nbins=35, title="Loan Percent Income Distribution")),
+        ("Age Distribution", px.histogram(df, x="person_age", nbins=35, title="Age Distribution")),
+        ("Employment Length Distribution", px.histogram(df, x="person_emp_length", nbins=35, title="Employment Length Distribution")),
+        ("Loan Amount vs Income", px.scatter(df, x="person_income", y="loan_amnt", color=TARGET_COLUMN, title="Loan Amount vs Income")),
+        ("Loan Interest Rate vs Loan Status", px.box(df, x=TARGET_COLUMN, y="loan_int_rate", color=TARGET_COLUMN, title="Loan Interest Rate vs Loan Status")),
+    ]
+    for name, fig in charts:
+        fig.update_layout(plot_bgcolor="#0B1120", paper_bgcolor="#0B1120", font={"color": "#F8FAFC"})
+        st.plotly_chart(fig, use_container_width=True)
+
+    corr = df[[
+        "person_age",
+        "person_income",
+        "person_emp_length",
+        "loan_amnt",
+        "loan_int_rate",
+        "loan_percent_income",
+        "cb_person_cred_hist_length",
+        TARGET_COLUMN,
+    ]].corr()
+    heatmap = px.imshow(corr, text_auto=True, color_continuous_scale="RdBu_r", title="Correlation Heatmap")
+    st.plotly_chart(heatmap, use_container_width=True)
+
+
+def render_single_prediction_page():
+    st.title("SINGLE BORROWER RISK ASSESSMENT")
+    artifacts = get_project_artifacts()
+    final_model = artifacts["final_model"]
+    threshold = artifacts["selected_threshold"]
+    segmentation_artifacts = get_segmentation_data()
+
+    with st.form("single_borrower_form"):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            person_age = st.number_input("Person Age", min_value=18, max_value=100, value=35)
+            person_income = st.number_input("Person Income", min_value=1000, value=70000)
+            person_emp_length = st.number_input("Person Employment Length (Years)", min_value=0.0, max_value=40.0, value=4.0)
+            loan_amount = st.number_input("Loan Amount", min_value=100, value=25000)
+            loan_interest_rate = st.number_input("Loan Interest Rate (%)", min_value=1.0, max_value=50.0, value=12.0)
+        with col2:
+            person_home_ownership = st.selectbox("Person Home Ownership", ["RENT", "MORTGAGE", "OWN", "OTHER"])
+            loan_intent = st.selectbox("Loan Intent", ["PERSONAL", "EDUCATION", "MEDICAL", "VENTURE", "HOMEIMPROVEMENT", "DEBTCONSOLIDATION"])
+            loan_grade = st.selectbox("Loan Grade", ["A", "B", "C", "D", "E", "F", "G"])
+            cb_person_default_on_file = st.selectbox("Credit Default History on File", ["Y", "N"])
+            loan_percent_income = st.number_input("Loan Percent Income", min_value=0.0, max_value=1.0, value=0.25)
+        with col3:
+            cb_person_cred_hist_length = st.number_input("Credit History Length", min_value=0, max_value=40, value=5)
+            submit = st.form_submit_button("PREDICT DEFAULT RISK")
+
+    if submit:
+        record = {
+            "person_age": person_age,
+            "person_income": person_income,
+            "person_home_ownership": person_home_ownership,
+            "person_emp_length": person_emp_length,
+            "loan_intent": loan_intent,
+            "loan_grade": loan_grade,
+            "loan_amnt": loan_amount,
+            "loan_int_rate": loan_interest_rate,
+            "loan_percent_income": loan_percent_income,
+            "cb_person_default_on_file": cb_person_default_on_file,
+            "cb_person_cred_hist_length": cb_person_cred_hist_length,
+        }
+        result = predict_single_borrower(record, final_model, threshold, segmentation_artifacts)
+
+        default_probability = result["default_probability"] * 100
+        no_default_probability = result["no_default_probability"] * 100
+        risk = result["risk_band"]
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Default Probability", f"{default_probability:.1f}%")
+        with col2:
+            st.metric("No-Default Probability", f"{no_default_probability:.1f}%")
+        with col3:
+            st.metric("Risk Band", risk)
+
+        st.write("### Prediction Result")
+        st.write(f"Borrower Segment ID: {result['segment_id']}")
+        st.write(f"Borrower Segment Name: {result['segment_name']}")
+        st.write(f"Selected Model: {artifacts['metadata'].get('selected_model', 'Final Model')}")
+        st.write(f"Decision Threshold: {threshold:.2f}")
+
+        fig = go.Figure(go.Indicator(
+            mode="gauge+number",
+            value=default_probability,
+            domain={"x": [0, 1], "y": [0, 1]},
+            title={"text": "Default Risk Gauge"},
+            gauge={
+                "axis": {"range": [None, 100], "tickwidth": 1, "tickcolor": "#fff"},
+                "bar": {"color": "#EF4444"},
+                "steps": [
+                    {"range": [0, 30], "color": "#22C55E"},
+                    {"range": [30, 60], "color": "#F59E0B"},
+                    {"range": [60, 100], "color": "#EF4444"},
+                ],
+                "threshold": {"line": {"color": "#fff", "width": 3}, "thickness": 0.75, "value": 50},
+            },
+        ))
+        fig.update_layout(paper_bgcolor="#0B1120", font={"color": "#F8FAFC"})
+        st.plotly_chart(fig, use_container_width=True)
+
+        explanation = (
+            f"This borrower is classified as a {risk.lower()} borrower. The model estimates a {default_probability:.1f}% probability of default. "
+            f"Their loan amount, income ratio, and interest rate contribute to the overall risk assessment. "
+            f"The borrower belongs to the '{result['segment_name']}' segment."
+        )
+        st.write("### Plain-English Explanation")
+        st.write(explanation)
+
+
+def render_bulk_page():
+    st.title("BULK BORROWER RISK ANALYSIS")
+    artifacts = get_project_artifacts()
+    final_model = artifacts["final_model"]
+    threshold = artifacts["selected_threshold"]
+    segmentation = get_segmentation_data()
+
+    uploaded = st.file_uploader("Upload borrower CSV", type=["csv"])
+    if uploaded is not None:
+        df = pd.read_csv(uploaded)
+        st.write("### Dataset Preview")
+        st.dataframe(df.head(10), use_container_width=True)
+
+        required_columns = [
+            "person_age", "person_income", "person_home_ownership", "person_emp_length", "loan_intent",
+            "loan_grade", "loan_amnt", "loan_int_rate", "loan_percent_income", "cb_person_default_on_file",
+            "cb_person_cred_hist_length"
+        ]
+        missing = [col for col in required_columns if col not in df.columns]
+        if missing:
+            st.error(f"The CSV is missing required columns: {missing}")
+        else:
+            if st.button("Run Bulk Risk Analysis"):
+                results = bulk_predict_records(df, final_model, threshold, segmentation)
+                st.write("### Risk Summary")
+                high_risk = (results["risk_band"] == "High Risk").sum()
+                medium_risk = (results["risk_band"] == "Medium Risk").sum()
+                low_risk = (results["risk_band"] == "Low Risk").sum()
+                avg_default = results["default_probability"].mean() * 100
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Total Borrowers", len(results))
+                with col2:
+                    st.metric("High Risk Borrowers", high_risk)
+                with col3:
+                    st.metric("Medium Risk Borrowers", medium_risk)
+                with col4:
+                    st.metric("Low Risk Borrowers", low_risk)
+                st.metric("Average Default Probability", f"{avg_default:.2f}%")
+                st.write("### Result Table")
+                st.dataframe(results[[
+                    "person_age", "person_income", "loan_amnt", "loan_int_rate", "default_probability",
+                    "no_default_probability", "risk_band", "segment_id", "segment_name"
+                ]], use_container_width=True)
+
+                csv_data = results.to_csv(index=False)
+                st.download_button("DOWNLOAD RISK REPORT", data=csv_data, file_name="loan_risk_report.csv", mime="text/csv")
+
+
+def render_segmentation_page():
+    st.title("BORROWER SEGMENTATION")
+    df = get_dataset()
+    segmentation = get_segmentation_data()
+    profile = segmentation["segment_profile"]
+    st.write(f"Silhouette Score: {segmentation['silhouette_score']:.4f}")
+    st.dataframe(profile, use_container_width=True)
+
+    fig = px.bar(profile, x="segment_id", y="borrowers", color="segment_id", title="Cluster Distribution")
+    st.plotly_chart(fig, use_container_width=True)
+
+    default_rate_fig = px.bar(profile, x="Segment Name", y="default_rate", color="segment_id", title="Default Rate by Segment")
+    st.plotly_chart(default_rate_fig, use_container_width=True)
+
+    if "person_income" in df.columns:
+        cluster_assignment = segmentation["model"].predict(segmentation["scaler"].transform(pd.DataFrame(segmentation["imputer"].transform(df[SEGMENT_FEATURES]), columns=SEGMENT_FEATURES)))
+        plot_df = df.copy()
+        plot_df["segment_id"] = cluster_assignment
+        fig2 = px.scatter(plot_df, x="loan_amnt", y="person_income", color="segment_id", title="Cluster View by Loan Amount and Income")
+        st.plotly_chart(fig2, use_container_width=True)
+
+
+def render_model_performance_page():
+    st.title("MODEL PERFORMANCE & EVALUATION")
+    artifacts = get_project_artifacts()
+    comparison_df = artifacts["comparison_table"]
+    st.dataframe(comparison_df, use_container_width=True)
+
+    metrics = ["Accuracy", "Precision", "Recall", "F1 Score", "ROC-AUC"]
+    fig = px.bar(comparison_df, x="Model Name", y=metrics, barmode="group", title="Model Comparison")
+    st.plotly_chart(fig, use_container_width=True)
+
+    baseline_accuracy = artifacts["metadata"].get("baseline_accuracy", 0.0)
+    st.metric("Baseline Accuracy", f"{baseline_accuracy:.4f}")
+
+    st.markdown("### Final Threshold Information")
+    st.write(f"Selected model: {artifacts['metadata']['selected_model']}")
+    st.write(f"Selected threshold: {artifacts['selected_threshold']:.2f}")
+
+
+def render_about_project():
+    st.title("About Project")
+    st.markdown(
+        """
+        <div class="section-title">Loan Default Risk Prediction and Borrower Segmentation Platform</div>
+        <p><strong>Student Roll Number:</strong> 52</p>
+        <p><strong>Project Type:</strong> Data Mining and Machine Learning</p>
+        <p><strong>Objective:</strong> To predict the probability of loan default using supervised machine learning and segment borrowers using unsupervised learning techniques.</p>
+        <p><strong>Algorithms:</strong> Logistic Regression, Random Forest, Gradient Boosting, K-Means Clustering</p>
+        <p><strong>Dataset:</strong> Credit Risk Dataset</p>
+        <p>This application is designed as an academic project to demonstrate end-to-end machine learning workflows for credit risk assessment, borrower segmentation, and practical business-oriented analytics.</p>
+        <p><strong>Important Note:</strong> Predictions are estimates intended for educational and analytical use. They should not be used alone for lending decisions.</p>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def main():
+    local_css()
+    st.set_page_config(page_title="Loan Default Risk Platform", layout="wide")
+    st.sidebar.title("Navigation")
+    nav = st.sidebar.radio(
+        "Pages",
+        [
+            "Dashboard Overview",
+            "EDA & Insights",
+            "Single Borrower Prediction",
+            "Bulk Prediction",
+            "Borrower Segmentation",
+            "Model Performance",
+            "About Project",
+        ],
+    )
+
+    if nav == "Dashboard Overview":
+        render_dashboard()
+    elif nav == "EDA & Insights":
+        render_eda()
+    elif nav == "Single Borrower Prediction":
+        render_single_prediction_page()
+    elif nav == "Bulk Prediction":
+        render_bulk_page()
+    elif nav == "Borrower Segmentation":
+        render_segmentation_page()
+    elif nav == "Model Performance":
+        render_model_performance_page()
+    elif nav == "About Project":
+        render_about_project()
+
+
+if __name__ == "__main__":
+    main()

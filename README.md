@@ -1,2 +1,8 @@
-# R_52_SetA_App
-HousePulse AI - intelligent house valuation and market positioning platform
+streamlit>=1.35.0
+pandas>=2.2.0
+numpy>=1.26.0
+scikit-learn>=1.4.0
+joblib>=1.4.0
+plotly>=5.22.0
+matplotlib>=3.8.0
+seaborn>=0.13.0

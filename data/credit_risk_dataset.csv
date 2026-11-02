@@ -1,0 +1,95 @@
+# Loan Default Risk Prediction and Borrower Segmentation Platform
+
+## Project Description
+This project develops a professional fintech-style loan default risk analytics platform for academic evaluation. It combines supervised learning and unsupervised segmentation to predict the probability of default for borrowers and profile them into meaningful business segments.
+
+## Features
+- Risk prediction using Logistic Regression, Random Forest, and Gradient Boosting
+- Borrower segmentation using K-Means clustering
+- Interactive dashboard backed by Streamlit
+- Data exploration and visual analytics
+- Bulk CSV prediction workflow
+- Model comparison and threshold selection using validation data
+- Professional fintech dashboard design
+
+## Algorithms
+- Logistic Regression
+- Random Forest Classifier
+- Gradient Boosting Classifier
+- K-Means Clustering
+
+## Folder Structure
+```text
+R_52_Set1_App/
+    app.py
+    config.py
+    pipeline.py
+    train.py
+    requirements.txt
+    README.md
+    model/
+        .gitkeep
+    data/
+        credit_risk_dataset.csv
+```
+
+## Installation
+```bash
+python -m pip install -r requirements.txt
+```
+
+## Setup
+1. Place the real `credit_risk_dataset.csv` file inside the `data/` folder.
+2. Ensure the dataset contains the required columns:
+   - person_age
+   - person_income
+   - person_home_ownership
+   - person_emp_length
+   - loan_intent
+   - loan_grade
+   - loan_amnt
+   - loan_int_rate
+   - loan_status
+   - loan_percent_income
+   - cb_person_default_on_file
+   - cb_person_cred_hist_length
+
+## Run the project
+```bash
+python train.py
+python -m streamlit run app.py
+```
+
+## Training
+`train.py` loads and cleans the dataset, trains the three classifiers, trains K-Means, evaluates the models, saves the trained artifacts to the `model/` folder, and stores the final comparison table.
+
+## Dataset Information
+The project uses the real credit risk dataset, with:
+- Target variable: `loan_status`
+- Test size: 20%
+- Random state: 52
+- Number of clusters: 5
+
+## Model Evaluation
+The platform evaluates models using:
+- Accuracy
+- Precision
+- Recall
+- F1 Score
+- ROC-AUC
+- Confusion Matrix
+- Classification Report
+
+Final model selection follows a transparent validation rule that balances recall, precision, and F1 score, rather than using accuracy alone.
+
+## Screenshots
+Place screenshots in this section after running the app locally.
+
+## Academic Project Details
+- Roll Number: 52
+- Project Name: Loan Default Risk Platform
+- Project Type: Data Mining and Machine Learning
+- Objective: Predict loan default probability and segment borrowers using machine learning techniques.
+
+## Important Note
+This tool is intended for analysis and educational use. Predictions are estimates and should not be used as the sole basis for credit or lending decisions.
