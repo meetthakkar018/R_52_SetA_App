@@ -1,0 +1,105 @@
+# Loan Default Risk Prediction and Borrower Segmentation Platform
+
+## Project Description
+This project develops a professional fintech-style loan default risk analytics platform for an MScIT Data Mining and Machine Learning assignment. It combines supervised learning and unsupervised segmentation to predict default risk and profile borrowers into meaningful business segments.
+
+## Features
+- Real CSV dataset loading and preprocessing
+- Stratified train-test split with random state 52
+- Logistic Regression, Random Forest, and Gradient Boosting models
+- Baseline model evaluation
+- Decision threshold selection using validation data
+- K-Means clustering for borrower segmentation
+- Interactive dashboards and charts with Plotly
+- Bulk borrower risk analysis from CSV upload
+- Single borrower risk prediction and explanation
+- Professional Streamlit UI for academic demonstration
+
+## Algorithms
+- Logistic Regression
+- Random Forest Classifier
+- Gradient Boosting Classifier
+- K-Means Clustering
+
+## Folder Structure
+```text
+R_52_Set1_App/
+    app.py
+    config.py
+    pipeline.py
+    train.py
+    requirements.txt
+    README.md
+    model/
+        .gitkeep
+    data/
+        credit_risk_dataset.csv
+```
+
+## Installation
+```bash
+python -m pip install -r requirements.txt
+```
+
+## Setup
+Place the real dataset at:
+- D:\roo52\data\credit_risk_dataset.csv
+or
+- project_root/data/credit_risk_dataset.csv
+
+The project reads the first valid dataset location automatically.
+
+## How to Run
+```bash
+python train.py
+python -m streamlit run app.py
+```
+
+## How to Train
+The train script performs:
+- dataset loading
+- cleaning and preprocessing
+- train/test split
+- model training
+- validation threshold selection
+- model comparison
+- K-Means segmentation
+- model artifact saving in model/
+
+## Dataset Information
+- Target variable: loan_status
+- Test size: 20%
+- Random state: 52
+- Number of clusters: 5
+- Required columns:
+  - person_age
+  - person_income
+  - person_home_ownership
+  - person_emp_length
+  - loan_intent
+  - loan_grade
+  - loan_amnt
+  - loan_int_rate
+  - loan_status
+  - loan_percent_income
+  - cb_person_default_on_file
+  - cb_person_cred_hist_length
+
+## Model Evaluation
+Models are evaluated using:
+- Accuracy
+- Precision
+- Recall
+- F1 Score
+- ROC-AUC
+- Confusion Matrix
+
+The final model is selected using a transparent validation rule that balances recall, precision, and F1 score instead of relying solely on accuracy.
+
+## Academic Details
+- Roll Number: 52
+- Project Name: Loan Default Risk Platform
+- Project Type: Data Mining and Machine Learning
+
+## Important Note
+Predictions are educational estimates and should not be used alone for lending decisions.
